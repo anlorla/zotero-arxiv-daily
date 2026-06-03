@@ -110,7 +110,28 @@ class Executor:
         if len(all_papers) > 0:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
+
+            # Log the score distribution so the min_score threshold can be calibrated.
+            top_scores = [round(p.score, 2) for p in reranked_papers[:15]]
+            logger.info(f"Score distribution (top 15): {top_scores}")
+
+            min_score = self.config.executor.get("min_score", None)
+            if min_score is not None:
+                kept = [p for p in reranked_papers if p.score is not None and p.score >= min_score]
+                logger.info(
+                    f"min_score={min_score}: {len(kept)}/{len(reranked_papers)} papers passed the relevance threshold"
+                )
+                reranked_papers = kept
+
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
+            if reranked_papers:
+                logger.info(
+                    "Kept papers and scores:\n"
+                    + "\n".join(f"  {round(p.score, 2)}  {p.title}" for p in reranked_papers)
+                )
+            if len(reranked_papers) == 0 and not self.config.executor.send_empty:
+                logger.info("No papers passed the relevance threshold. No email will be sent.")
+                return
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)

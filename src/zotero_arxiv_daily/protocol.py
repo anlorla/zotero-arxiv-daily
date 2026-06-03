@@ -8,6 +8,24 @@ from loguru import logger
 import json
 RawPaperItem = TypeVar('RawPaperItem')
 
+
+def _format_tldr_html(tldr: Optional[str]) -> str:
+    """Make the model output safe to drop straight into the HTML email.
+
+    The model is asked to use <strong> labels and <br> separators, but models
+    sometimes fall back to markdown (**label**) or plain newlines. Normalize
+    both so the structured layout always renders.
+    """
+    if not tldr:
+        return tldr or ""
+    text = tldr.strip()
+    # markdown bold -> <strong>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    # if the model used newlines instead of <br>, convert the remaining ones
+    text = re.sub(r"\n+", "<br>", text)
+    return text
+
+
 @dataclass
 class Paper:
     source: str
@@ -23,38 +41,47 @@ class Paper:
 
     def _generate_tldr_with_llm(self, openai_client:OpenAI,llm_params:dict) -> str:
         lang = llm_params.get('language', 'English')
-        prompt = f"Given the following information of a paper, generate a one-sentence TLDR summary in {lang}:\n\n"
+
+        prompt = "Here is the information of a paper.\n\n"
         if self.title:
-            prompt += f"Title:\n {self.title}\n\n"
-
+            prompt += f"Title:\n{self.title}\n\n"
         if self.abstract:
-            prompt += f"Abstract: {self.abstract}\n\n"
-
+            prompt += f"Abstract:\n{self.abstract}\n\n"
         if self.full_text:
-            prompt += f"Preview of main content:\n {self.full_text}\n\n"
+            prompt += f"Main content (may be truncated):\n{self.full_text}\n\n"
 
         if not self.full_text and not self.abstract:
             logger.warning(f"Neither full text nor abstract is provided for {self.url}")
             return "Failed to generate TLDR. Neither full text nor abstract is provided"
-        
-        # use gpt-4o tokenizer for estimation
+
+        # use gpt-4o tokenizer for estimation. We now feed far fewer papers, so we can
+        # afford a much larger context and produce a substantive, structured summary.
         enc = tiktoken.encoding_for_model("gpt-4o")
         prompt_tokens = enc.encode(prompt)
-        prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
+        prompt_tokens = prompt_tokens[:12000]  # truncate to 12000 tokens
         prompt = enc.decode(prompt_tokens)
-        
+
+        system_prompt = (
+            f"你是一位帮研究者做论文速读的助手，回答必须用{lang}。"
+            "请基于论文内容输出一段结构化速读摘要，严格按下面的格式：每个要点之间用 <br> 分隔，"
+            "标签用 <strong> 包裹，不要使用 markdown 的 ** 号，也不要任何开场白或结尾。\n\n"
+            "<strong>一句话</strong>：用一句话说清这篇论文最核心的贡献。<br>"
+            "<strong>问题</strong>：它针对什么问题、为什么以前的做法不够好（1-2 句）。<br>"
+            "<strong>做法</strong>：关键方法或核心想法，点出真正新颖之处，别堆术语（2-3 句）。<br>"
+            "<strong>结果</strong>：主要实验结论或关键数字，有对比基线就写清楚（1-2 句）。<br>"
+            "<strong>亮点</strong>：为什么值得读，新意或反直觉的点在哪，或有什么局限（1-2 句）。\n\n"
+            "用平实的中文，讲清楚胜过堆砌名词。如果某个要点信息确实缺失，就如实写“原文未明确”。"
+        )
+
         response = openai_client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": f"You are an assistant who perfectly summarizes scientific paper, and gives the core idea of the paper to the user. Your answer should be in {lang}.",
-                },
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             **llm_params.get('generation_kwargs', {})
         )
         tldr = response.choices[0].message.content
-        return tldr
+        return _format_tldr_html(tldr)
     
     def generate_tldr(self, openai_client:OpenAI,llm_params:dict) -> str:
         try:
