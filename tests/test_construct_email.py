@@ -1,6 +1,11 @@
-"""Tests for zotero_arxiv_daily.construct_email: render_email, get_stars, get_block_html."""
+"""Tests for zotero_arxiv_daily.construct_email: render_email, get_relevance_pill, get_block_html."""
 
-from zotero_arxiv_daily.construct_email import render_email, get_stars, get_block_html, get_empty_html
+from zotero_arxiv_daily.construct_email import (
+    render_email,
+    get_relevance_pill,
+    get_block_html,
+    get_empty_html,
+)
 from tests.canned_responses import make_sample_paper
 
 
@@ -14,7 +19,7 @@ def test_render_email_with_papers():
 
 def test_render_email_empty_list():
     html = render_email([])
-    assert "No Papers Today" in html
+    assert "没有匹配的新论文" in html
 
 
 def test_render_email_author_truncation():
@@ -44,35 +49,47 @@ def test_render_email_affiliation_truncation():
 def test_render_email_no_affiliations():
     paper = make_sample_paper(affiliations=None, score=7.0, tldr="ok")
     html = render_email([paper])
-    assert "Unknown Affiliation" in html
+    assert "机构未知" in html
 
 
-def test_get_stars_low_score():
-    assert get_stars(5.0) == ""
-    assert get_stars(6.0) == ""
+def test_render_email_shows_score():
+    paper = make_sample_paper(score=5.8, tldr="ok")
+    html = render_email([paper])
+    assert "相关度 5.8" in html
 
 
-def test_get_stars_high_score():
-    stars = get_stars(8.0)
-    assert stars.count("full-star") == 5
+def test_get_relevance_pill_with_score():
+    pill = get_relevance_pill(5.8)
+    assert "相关度 5.8" in pill
+    assert "★" in pill
 
 
-def test_get_stars_mid_score():
-    stars = get_stars(7.0)
-    assert "star" in stars
-    assert stars.count("full-star") + stars.count("half-star") > 0
+def test_get_relevance_pill_none():
+    pill = get_relevance_pill(None)
+    assert "未知" in pill
 
 
 def test_get_block_html_contains_all_fields():
-    html = get_block_html("Title", "Auth", "3.5", "Summary", "http://pdf.url", "MIT")
+    html = get_block_html(
+        rank=1,
+        title="Title",
+        url="http://abs.url",
+        authors="Auth",
+        rate_html="PILL_MARKER",
+        tldr="Summary",
+        pdf_url="http://pdf.url",
+        affiliations="MIT",
+    )
     assert "Title" in html
     assert "Auth" in html
-    assert "3.5" in html
+    assert "PILL_MARKER" in html
     assert "Summary" in html
     assert "http://pdf.url" in html
+    assert "http://abs.url" in html
     assert "MIT" in html
+    assert ">1<" in html  # rank badge
 
 
 def test_get_empty_html():
     html = get_empty_html()
-    assert "No Papers Today" in html
+    assert "没有匹配的新论文" in html
