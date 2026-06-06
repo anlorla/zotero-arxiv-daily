@@ -12,7 +12,17 @@ from zotero_arxiv_daily.protocol import CorpusPaper, Paper
 
 _AFFILIATION_MARKER = "You are an assistant who perfectly extracts affiliations"
 _AFFILIATION_RESPONSE = '["TsingHua University","Peking University"]'
-_TLDR_RESPONSE = "Hello! How can I assist you today?"
+
+# A well-formed 6P TLDR, matching what protocol.py asks the model for.
+SAMPLE_TLDR_6P = (
+    "Problem：现有视频扩散模型推理成本过高，难以实时部署。\n"
+    "Premise：假设少步生成时模型仍保留大部分物理一致性先验。\n"
+    "Perturbation：把多步去噪蒸馏为两步并加入一致性正则；最大改动在训练流程层。\n"
+    "Principle：一致性约束让少步轨迹逼近完整轨迹端点，从而保住生成质量。\n"
+    "Proof：三个基准上比基线快十倍且指标持平，消融验证了正则项的必要性。\n"
+    "Push：扩展到交互式世界模型与更长时序。"
+)
+_TLDR_RESPONSE = SAMPLE_TLDR_6P
 
 
 def _make_chat_response(content: str) -> SimpleNamespace:

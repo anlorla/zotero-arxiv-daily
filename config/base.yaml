@@ -28,6 +28,15 @@ llm:
   # Arguments for the LLM API. See [here](https://platform.openai.com/docs/api-reference/chat/create) for more details.
     max_tokens: 16384
     model: ???
+  # 注意：GitHub Actions 的 CUSTOM_CONFIG 变量会在运行时整体覆盖 config/custom.yaml，
+  # 因此写在 custom.yaml 里的键在 CI 上不生效。下面两组 *_overrides 只存在于 base.yaml，
+  # 不会被变量覆盖，优先级高于 api/generation_kwargs —— 改服务或模型只需改这里。
+  api_overrides:
+    base_url: https://api.siliconflow.cn/v1 # 硅基流动；key 仍来自 OPENAI_API_KEY secret
+  generation_overrides:
+    model: deepseek-ai/DeepSeek-V4-Flash # 备选：deepseek-ai/DeepSeek-V3.2（更慢更贵，质量相近）
+    temperature: 0.3
+    max_tokens: 1536
   language: English # Preferred language for the TL;DR. Example: English
 
 reranker:
@@ -46,7 +55,7 @@ reranker:
 executor:
   debug: false # Whether to use debug mode. Example: true
   send_empty: false # Whether to send an empty email even if no new papers today. Example: true
-  max_paper_num: 100 # The maximum number of the papers presented in the email. Example: 100
-  min_score: null # Minimum relevance score to keep a paper. Papers scoring below this are dropped before the max_paper_num cap. null disables the threshold. Example: 4.0
+  max_paper_num: 7 # The maximum number of the papers presented in the email. Example: 100
+  min_score: 4.3 # Minimum relevance score to keep a paper. Papers scoring below this are dropped before the max_paper_num cap. null disables the threshold. Example: 4.0
   source: ??? # The sources of papers to retrieve. Example: ['arxiv','biorxiv','medrxiv']
   reranker: local # The reranker to use. Example: 'local' or 'api'

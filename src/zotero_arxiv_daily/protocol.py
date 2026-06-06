@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, TypeVar
 from datetime import datetime
+import html
 import re
 import tiktoken
 from openai import OpenAI
@@ -9,21 +10,74 @@ import json
 RawPaperItem = TypeVar('RawPaperItem')
 
 
-def _format_tldr_html(tldr: Optional[str]) -> str:
-    """Make the model output safe to drop straight into the HTML email.
+# The 6P speed-reading framework used for every TLDR. construct_email.py parses
+# these labels back out of Paper.tldr to render the structured layout, so keep
+# the two files in sync if you change them.
+TLDR_LABELS = ("Problem", "Premise", "Perturbation", "Principle", "Proof", "Push")
 
-    The model is asked to use <strong> labels and <br> separators, but models
-    sometimes fall back to markdown (**label**) or plain newlines. Normalize
-    both so the structured layout always renders.
+
+def resolve_generation_kwargs(llm_params: dict) -> dict:
+    """Merge llm.generation_kwargs with llm.generation_overrides.
+
+    The GitHub Actions workflow overwrites config/custom.yaml wholesale with the
+    CUSTOM_CONFIG repository variable, so keys set there (e.g. an outdated model
+    name) cannot be fixed from the repo. base.yaml's generation_overrides wins
+    over generation_kwargs, which lets the repo pin the actual model in code.
     """
-    if not tldr:
-        return tldr or ""
-    text = tldr.strip()
-    # markdown bold -> <strong>
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    # if the model used newlines instead of <br>, convert the remaining ones
-    text = re.sub(r"\n+", "<br>", text)
-    return text
+    kwargs = dict(llm_params.get('generation_kwargs', None) or {})
+    overrides = llm_params.get('generation_overrides', None)
+    if overrides:
+        kwargs.update(dict(overrides))
+    return kwargs
+
+
+def clean_tldr_text(text: Optional[str]) -> str:
+    """Normalize raw model output to plain text.
+
+    The model is instructed to return plain text, but unstable providers leak
+    HTML tags, markdown markers or LaTeX commands. Strip all of it here so the
+    email renderer only ever receives plain text (it does its own escaping).
+    """
+    if not text:
+        return ""
+    t = html.unescape(text)
+    # code fences and markdown emphasis/heading markers
+    t = re.sub(r"```[a-zA-Z]*", "", t)
+    t = re.sub(r"\*\*|__|(?<![a-zA-Z0-9])[#`]+", "", t)
+    # HTML tags, comment markers, and any leftover angle brackets — the
+    # summaries are prose, so stray '<'/'>' are never legitimate content
+    t = re.sub(r"<[^<>]{0,80}>", " ", t)
+    t = t.replace("<!--", " ").replace("-->", " ")
+    t = re.sub(r"[<>]", " ", t)
+    # LaTeX: \command{content} -> content, then stray \command and '$'
+    t = re.sub(r"\\[a-zA-Z]+\{([^{}]*)\}", r"\1", t)
+    t = re.sub(r"\\[a-zA-Z]+", " ", t)
+    t = t.replace("\\", " ").replace("$", "")
+    # collapse whitespace per line, drop empty lines
+    lines = [re.sub(r"[ \t 　]+", " ", line).strip() for line in t.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def looks_garbled(text: str) -> bool:
+    """Heuristics for the broken-LLM failure mode seen in production:
+    duplicated CJK characters (和和和), replacement chars, mangled markup, or
+    output that lost the required 6P structure."""
+    if not text:
+        return True
+    if "�" in text:
+        return True
+    # a CJK char repeated 3+ times in a row is essentially never legitimate
+    if re.search(r"([一-鿿])\1{2}", text):
+        return True
+    # many distinct doubled CJK chars (legit words like 渐渐 exist, but several
+    # in one short summary indicates token-level corruption)
+    if len(re.findall(r"([一-鿿])\1", text)) >= 4:
+        return True
+    found_labels = sum(
+        1 for label in TLDR_LABELS
+        if re.search(rf"^{label}\s*[:：]", text, flags=re.MULTILINE)
+    )
+    return found_labels < 4
 
 
 @dataclass
@@ -40,49 +94,58 @@ class Paper:
     score: Optional[float] = None
 
     def _generate_tldr_with_llm(self, openai_client:OpenAI,llm_params:dict) -> str:
-        lang = llm_params.get('language', 'English')
+        lang = llm_params.get('language', '中文')
 
-        prompt = "Here is the information of a paper.\n\n"
+        prompt = "论文信息如下。\n\n"
         if self.title:
-            prompt += f"Title:\n{self.title}\n\n"
+            prompt += f"标题：\n{self.title}\n\n"
         if self.abstract:
-            prompt += f"Abstract:\n{self.abstract}\n\n"
+            prompt += f"摘要：\n{self.abstract}\n\n"
         if self.full_text:
-            prompt += f"Main content (may be truncated):\n{self.full_text}\n\n"
+            prompt += f"正文（可能被截断）：\n{self.full_text}\n\n"
 
         if not self.full_text and not self.abstract:
             logger.warning(f"Neither full text nor abstract is provided for {self.url}")
             return "Failed to generate TLDR. Neither full text nor abstract is provided"
 
-        # use gpt-4o tokenizer for estimation. We now feed far fewer papers, so we can
-        # afford a much larger context and produce a substantive, structured summary.
+        # use gpt-4o tokenizer for estimation; cap the (often messy LaTeX)
+        # full text so a weak provider is not pushed past its usable context
         enc = tiktoken.encoding_for_model("gpt-4o")
         prompt_tokens = enc.encode(prompt)
-        prompt_tokens = prompt_tokens[:12000]  # truncate to 12000 tokens
+        prompt_tokens = prompt_tokens[:8000]  # truncate to 8000 tokens
         prompt = enc.decode(prompt_tokens)
 
         system_prompt = (
-            f"你是一位帮研究者做论文速读的助手，回答必须用{lang}。"
-            "请基于论文内容输出一段结构化速读摘要，严格按下面的格式：每个要点之间用 <br> 分隔，"
-            "标签用 <strong> 包裹，不要使用 markdown 的 ** 号，也不要任何开场白或结尾。\n\n"
-            "<strong>一句话</strong>：用一句话说清这篇论文最核心的贡献。<br>"
-            "<strong>问题</strong>：它针对什么问题、为什么以前的做法不够好（1-2 句）。<br>"
-            "<strong>做法</strong>：关键方法或核心想法，点出真正新颖之处，别堆术语（2-3 句）。<br>"
-            "<strong>结果</strong>：主要实验结论或关键数字，有对比基线就写清楚（1-2 句）。<br>"
-            "<strong>亮点</strong>：为什么值得读，新意或反直觉的点在哪，或有什么局限（1-2 句）。\n\n"
-            "用平实的中文，讲清楚胜过堆砌名词。如果某个要点信息确实缺失，就如实写“原文未明确”。"
+            f"你是一位帮研究者做论文速读的助手。请按以下六个分析维度输出论文速读，"
+            f"内容用{lang}，标签保持英文原样。只输出纯文本：每个维度一行，行首是标签后跟中文冒号，"
+            "禁止任何 HTML 标签、Markdown 符号、LaTeX 命令、项目符号，也不要任何开场白或结尾。\n\n"
+            "Problem：这篇工作要解决的真正瓶颈是什么？\n"
+            "Premise：方法成立依赖哪些关键假设？\n"
+            "Perturbation：相对已有工作改动了什么？最大的改动发生在哪一层（数据/表示/架构/目标/训练流程/评测）？\n"
+            "Principle：为什么这个改动应该有效？背后的机理是什么？\n"
+            "Proof：实验证据是否把效果归因到了这个改动上（消融/对照是否干净）？关键数字是什么？\n"
+            "Push：下一步最自然的延伸是什么？\n\n"
+            "每行 1-3 句，写实、具体，不要套话。如果某个维度论文没有给出信息，就写：原文未明确。"
         )
 
-        response = openai_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            **llm_params.get('generation_kwargs', {})
-        )
-        tldr = response.choices[0].message.content
-        return _format_tldr_html(tldr)
-    
+        gen_kwargs = resolve_generation_kwargs(llm_params)
+        last_tldr = None
+        for attempt in range(2):
+            response = openai_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                **gen_kwargs
+            )
+            last_tldr = clean_tldr_text(response.choices[0].message.content)
+            if not looks_garbled(last_tldr):
+                return last_tldr
+            logger.warning(
+                f"TLDR of {self.url} looks garbled (attempt {attempt + 1}/2): {last_tldr[:80]!r}"
+            )
+        raise ValueError("model kept returning garbled TLDR output")
+
     def generate_tldr(self, openai_client:OpenAI,llm_params:dict) -> str:
         try:
             tldr = self._generate_tldr_with_llm(openai_client,llm_params)
@@ -110,7 +173,7 @@ class Paper:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                **llm_params.get('generation_kwargs', {})
+                **resolve_generation_kwargs(llm_params)
             )
             affiliations = affiliations.choices[0].message.content
 
@@ -120,7 +183,7 @@ class Paper:
             affiliations = [str(a) for a in affiliations]
 
             return affiliations
-    
+
     def generate_affiliations(self, openai_client:OpenAI,llm_params:dict) -> Optional[list[str]]:
         try:
             affiliations = self._generate_affiliations_with_llm(openai_client,llm_params)

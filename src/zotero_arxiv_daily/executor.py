@@ -38,7 +38,11 @@ class Executor:
             source: get_retriever_cls(source)(config) for source in config.executor.source
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
-        self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
+        # base.yaml 的 api_overrides 优先于 llm.api（CUSTOM_CONFIG 变量会整体覆盖
+        # custom.yaml，base.yaml 里的键不受影响），换 LLM 服务只需改 base.yaml。
+        api_overrides = config.llm.get("api_overrides", None) or {}
+        base_url = api_overrides.get("base_url", None) or config.llm.api.base_url
+        self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=base_url)
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
         logger.info("Fetching zotero corpus")
         zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)

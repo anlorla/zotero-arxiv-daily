@@ -1,3 +1,9 @@
+# ⚠️ 注意：GitHub Actions 运行时会用仓库变量 CUSTOM_CONFIG 的内容整体覆盖本文件，
+# 所以这里的改动只对本地运行生效！想让 CI 上的行为可控，有两个去处：
+#   - 只想改阈值/模型/服务地址 → 改 config/base.yaml（*_overrides 和 executor 默认值），
+#     那里的键不会被 CUSTOM_CONFIG 覆盖；
+#   - 想改 Zotero/邮箱/arXiv 类别 → 去 GitHub 仓库 Settings → Actions Variables
+#     更新 CUSTOM_CONFIG 变量本身。
 zotero:
   user_id: ${oc.env:ZOTERO_ID}
   api_key: ${oc.env:ZOTERO_KEY}
@@ -15,7 +21,7 @@ llm:
     key: ${oc.env:OPENAI_API_KEY}
     base_url: ${oc.env:OPENAI_API_BASE}
   generation_kwargs:
-    model: gpt-4o-mini
+    model: deepseek-ai/DeepSeek-V4-Flash # 实际生效的模型在 base.yaml 的 llm.generation_overrides
   language: 中文 # TL;DR 用中文输出
 
 source:
@@ -25,8 +31,5 @@ source:
 executor:
   debug: ${oc.env:DEBUG,null}
   source: ['arxiv']
-  max_paper_num: 7 # 每天最多 7 篇精华
-  # 相关性门槛：低于该分数的论文直接丢弃（在 7 篇上限之前生效）。
-  # 每次运行日志会打印 "Score distribution" 和被保留论文的分数，
-  # 先跑一两天看实际分布，再把这个值调到能滤掉弱相关的位置（jina 模型一般 3~5 之间）。
-  min_score: 4.3
+  max_paper_num: 7 # 每天最多 7 篇精华（CI 上实际生效的默认值在 base.yaml）
+  min_score: 4.3 # 相关性门槛，低于该分直接丢弃（CI 上实际生效的默认值在 base.yaml）
