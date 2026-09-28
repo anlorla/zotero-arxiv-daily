@@ -3,8 +3,6 @@
 import time
 from types import SimpleNamespace
 
-import feedparser
-
 from zotero_arxiv_daily.retriever.arxiv_retriever import ArxivRetriever, _run_with_hard_timeout
 import zotero_arxiv_daily.retriever.arxiv_retriever as arxiv_retriever
 
@@ -19,48 +17,69 @@ def _raise_runtime_error() -> None:
 
 
 def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
-    monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)
+    # Metadata comes straight from the RSS fixture; no arXiv API or downloads.
+    def _no_network(*args, **kwargs):
+        raise AssertionError("convert_to_paper must not touch the network")
 
-    # The RSS fixture gives us paper IDs.  After feedparser, the code calls
-    # arxiv.Client().results(search) which makes real HTTP requests.  We mock
-    # the arxiv Client so the test stays offline.
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", _no_network)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", _no_network)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", _no_network)
+
     new_entries = [
         e for e in mock_feedparser.entries
         if e.get("arxiv_announce_type", "new") == "new"
     ]
-    paper_ids = [e.id.removeprefix("oai:arXiv.org:") for e in new_entries]
-
-    # Build fake ArxivResult-like objects matching each RSS entry
-    fake_results = []
-    for entry in new_entries:
-        pid = entry.id.removeprefix("oai:arXiv.org:")
-        fake_results.append(SimpleNamespace(
-            title=entry.title,
-            authors=[SimpleNamespace(name="Test Author")],
-            summary="Test abstract",
-            pdf_url=f"https://arxiv.org/pdf/{pid}",
-            entry_id=f"https://arxiv.org/abs/{pid}",
-            source_url=lambda pid=pid: f"https://arxiv.org/e-print/{pid}",
-        ))
-
-    class FakeClient:
-        def __init__(self, **kw):
-            pass
-        def results(self, search):
-            return iter(fake_results)
-
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
-
-    # Skip file downloads in convert_to_paper
-    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", lambda paper: None)
-    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", lambda paper: None)
-    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", lambda paper: None)
 
     retriever = ArxivRetriever(config)
     papers = retriever.retrieve_papers()
 
     assert len(papers) == len(new_entries)
-    assert set(p.title for p in papers) == set(e.title for e in new_entries)
+    assert set(p.title for p in papers) == set(" ".join(e.title.split()) for e in new_entries)
+    for p in papers:
+        assert p.abstract and not p.abstract.startswith("arXiv:")
+        assert "Announce Type" not in p.abstract
+        assert p.authors and all("," not in a for a in p.authors)
+        pid = p.url.removeprefix("https://arxiv.org/abs/")
+        assert p.pdf_url == f"https://arxiv.org/pdf/{pid}"
+        assert p.full_text is None
+
+
+def test_arxiv_fetch_full_text_falls_back(config, mock_feedparser, monkeypatch):
+    calls = []
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", lambda r: calls.append("tar"))
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", lambda r: calls.append("html") or "html text")
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", lambda r: calls.append("pdf"))
+
+    retriever = ArxivRetriever(config)
+    paper = retriever.retrieve_papers()[0]
+    retriever.fetch_full_text(paper)
+
+    assert calls == ["tar", "html"]
+    assert paper.full_text == "html text"
+
+
+def test_arxiv_backfill_file(config, tmp_path, monkeypatch):
+    import json
+    from omegaconf import open_dict
+
+    path = tmp_path / "backfill.json"
+    path.write_text(json.dumps([
+        {"id": "2609.00001v1", "title": "T1", "authors": ["A", "B"], "abstract": "abs 1", "categories": ["cs.RO"]},
+        {"id": "2609.00002v2", "title": "T2", "authors": ["C"], "abstract": "abs 2"},
+    ]))
+    with open_dict(config):
+        config.source.arxiv.backfill_file = str(path)
+
+    def _no_rss(*args, **kwargs):
+        raise AssertionError("backfill mode must not read RSS")
+
+    monkeypatch.setattr(arxiv_retriever.feedparser, "parse", _no_rss)
+    papers = ArxivRetriever(config).retrieve_papers()
+
+    assert [p.title for p in papers] == ["T1", "T2"]
+    assert papers[0].authors == ["A", "B"]
+    assert papers[1].url == "https://arxiv.org/abs/2609.00002v2"
+    assert papers[1].pdf_url == "https://arxiv.org/pdf/2609.00002v2"
 
 
 def test_run_with_hard_timeout_returns_value():

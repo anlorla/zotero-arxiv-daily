@@ -1,0 +1,42 @@
+name: Backfill missed days
+# 补发：对 backfill/ 下预先生成的论文 JSON 跑一遍打分 + TLDR，并发一封邮件。
+# JSON 在本地用 scripts/build_arxiv_backfill.py 生成（CI 上 export.arxiv.org API 会 406）。
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "backfill JSON 路径，例如 backfill/2026-09-22_25.json"
+        required: true
+      subject:
+        description: "邮件标题"
+        required: true
+        default: "arXiv 补发"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run script
+        env:
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+          BACKFILL_FILE: ${{ inputs.file }}
+          BACKFILL_SUBJECT: ${{ inputs.subject }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          test -f "$BACKFILL_FILE"
+          uv run src/zotero_arxiv_daily/main.py \
+            "source.arxiv.backfill_file=$BACKFILL_FILE" \
+            "email.subject='$BACKFILL_SUBJECT'"

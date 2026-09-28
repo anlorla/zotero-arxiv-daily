@@ -9,6 +9,8 @@ from loguru import logger
 
 class BaseRetriever(ABC):
     name: str
+    # Pause between conversions; sources that hit the network per paper need it.
+    convert_sleep_seconds: float = 1
     def __init__(self, config:DictConfig):
         self.config = config
         self.retriever_config = getattr(config.source,self.name)
@@ -33,8 +35,13 @@ class BaseRetriever(ABC):
                 continue
             if paper is not None:
                 papers.append(paper)
-            sleep(1)
+            if self.convert_sleep_seconds:
+                sleep(self.convert_sleep_seconds)
         return papers
+
+    def fetch_full_text(self, paper: Paper) -> None:
+        """Fill paper.full_text for a paper that survived reranking. Default: no-op."""
+        return None
 
 registered_retrievers = {}
 

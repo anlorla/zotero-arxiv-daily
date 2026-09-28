@@ -136,6 +136,11 @@ class Executor:
             if len(reranked_papers) == 0 and not self.config.executor.send_empty:
                 logger.info("No papers passed the relevance threshold. No email will be sent.")
                 return
+            logger.info("Fetching full text for kept papers...")
+            for p in tqdm(reranked_papers):
+                retriever = self.retrievers.get(p.source)
+                if retriever is not None and p.full_text is None:
+                    retriever.fetch_full_text(p)
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
